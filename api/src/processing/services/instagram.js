@@ -97,6 +97,12 @@ const describeMedia = (data) => {
     });
 }
 
+// a video without any video urls would be returned as its cover image,
+// so it's better to treat it as missing and try the next lookup step
+const isMissingVideo = (media) =>
+    (media?.media_type === 2 && !media.video_versions?.length)
+    || !!media?.carousel_media?.some(e => e?.media_type === 2 && !e.video_versions?.length);
+
 export default function instagram(obj) {
     const dispatcher = obj.dispatcher;
 
@@ -185,6 +191,11 @@ export default function instagram(obj) {
         }).catch(e => debug(id, step, 'failed:', e.message));
 
         const item = mediaInfo?.items?.[0];
+        if (isMissingVideo(item)) {
+            debug(id, step, 'video without video_versions, skipping', describeMedia(item));
+            return;
+        }
+
         if (item) debug(id, step, 'got', describeMedia(item));
         return item;
     }
@@ -202,15 +213,19 @@ export default function instagram(obj) {
             return r.text();
         }).catch(e => debug(id, step, 'failed:', e.message));
 
-        const init = data?.match(/"init",\[\],\[(.*?)\]\],/)?.[1];
-        let embedData = init && JSON.parse(init);
+        let embedData;
+        try {
+            const init = data?.match(/"init",\[\],\[(.*?)\]\],/)?.[1];
+            const contextJSON = init && JSON.parse(init)?.contextJSON;
+            embedData = contextJSON && JSON.parse(contextJSON);
+        } catch (e) {
+            debug(id, step, 'bad embed data:', e.message);
+        }
 
-        if (!embedData || !embedData?.contextJSON) {
+        if (!embedData) {
             debug(id, step, 'no contextJSON in page');
             return false;
         }
-
-        embedData = JSON.parse(embedData.contextJSON);
 
         // embeds of newer videos come without a video_url, and treating
         // them as found would return the cover image instead of the video
@@ -285,6 +300,15 @@ export default function instagram(obj) {
     }
 
     async function requestGQL(id, cookie) {
+        const step = `graphql (${cookie ? 'cookie' : 'anonymous'})`;
+        try {
+            return await requestGQLMedia(id, cookie, step);
+        } catch (e) {
+            debug(id, step, 'failed:', e?.message);
+        }
+    }
+
+    async function requestGQLMedia(id, cookie, step) {
         const { headers, body } = await getGQLParams(id, cookie);
 
         const req = await fetch('https://www.instagram.com/graphql/query', {
@@ -312,7 +336,6 @@ export default function instagram(obj) {
         });
 
         // same media format as the mobile api, handled by extractNewPost
-        const step = `graphql (${cookie ? 'cookie' : 'anonymous'})`;
         const media = await req.json()
                         .then(r => {
                             const item = r?.data?.xdt_api__v1__media__shortcode__web_info?.items?.[0];
@@ -320,6 +343,11 @@ export default function instagram(obj) {
                             return item;
                         })
                         .catch(e => debug(id, step, `http ${req.status}`, 'bad json:', e.message));
+
+        if (isMissingVideo(media)) {
+            debug(id, step, 'video without video_versions, skipping', describeMedia(media));
+            return;
+        }
 
         if (media) debug(id, step, 'got', describeMedia(media));
         return media;
@@ -397,6 +425,11 @@ export default function instagram(obj) {
         for (const block of blocks) {
             try {
                 const media = findMedia(JSON.parse(block))?.if_not_gated_logged_out;
+                if (isMissingVideo(media)) {
+                    debug(id, step, 'video without video_versions, skipping', describeMedia(media));
+                    return;
+                }
+
                 if (media) {
                     debug(id, step, 'got', describeMedia(media));
                     return media;
