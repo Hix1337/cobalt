@@ -371,6 +371,42 @@ export default function instagram(obj) {
         return false;
     }
 
+    // the post page preloads media data for logged out users,
+    // it's in the same format as the mobile api (except for video sizes)
+    async function requestPrefetched(id) {
+        const step = 'prefetched page data';
+        const html = await fetch(`https://www.instagram.com/p/${id}/`, {
+            headers: embedHeaders,
+            dispatcher
+        }).then(r => r.text()).catch(e => debug(id, step, 'failed:', e.message));
+
+        const findMedia = (obj) => {
+            if (!obj || typeof obj !== 'object') return;
+            if (obj.xig_polaris_media) return obj.xig_polaris_media;
+
+            for (const value of Object.values(obj)) {
+                const media = findMedia(value);
+                if (media) return media;
+            }
+        }
+
+        const blocks = [...(html || '').matchAll(/<script type="application\/json"[^>]*>(.*?)<\/script>/gs)]
+            .map(m => m[1])
+            .filter(b => b.includes('"xig_polaris_media"'));
+
+        for (const block of blocks) {
+            try {
+                const media = findMedia(JSON.parse(block))?.if_not_gated_logged_out;
+                if (media) {
+                    debug(id, step, 'got', describeMedia(media));
+                    return media;
+                }
+            } catch {}
+        }
+
+        debug(id, step, `nothing found in ${blocks.length} blocks`);
+    }
+
     async function getErrorContext(id) {
         try {
             const { headers, body } = await getGQLParams(id);
@@ -575,6 +611,9 @@ export default function instagram(obj) {
                 data = await requestGQL(id);
                 if (!hasData(data) && cookie) data = await requestGQL(id, cookie);
             }
+
+            // last resort, doesn't depend on graphql at all
+            if (!hasData(data)) data = await requestPrefetched(id);
         } catch (e) {
             debug(id, 'lookup chain', 'aborted by exception:', e?.message);
         }
