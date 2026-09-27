@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { resolveRedirectingURL } from "../url.js";
 import { genericUserAgent } from "../../config.js";
 import { createStream } from "../../stream/manage.js";
+import { Cyan } from "../../misc/console-text.js";
 import { getCookie, updateCookie } from "../cookie/manager.js";
 
 const commonHeaders = {
@@ -53,6 +54,38 @@ const getNumberFromQuery = (name, data) => {
 const getObjectFromEntries = (name, data) => {
     const obj = data?.match(new RegExp('\\["' + name + '",.*?,({.*?}),\\d+\\]'))?.[1];
     return obj && JSON.parse(obj);
+}
+
+// set INSTAGRAM_DEBUG=1 to log every step of the post lookup chain
+const debugEnabled = process.env.INSTAGRAM_DEBUG === '1';
+const debug = (id, step, ...args) => {
+    if (debugEnabled) console.log(Cyan(`[instagram ${id}]`), `${step}:`, ...args);
+}
+
+const snippet = (data, length = 300) => {
+    const str = typeof data === 'string' ? data : JSON.stringify(data);
+    return str?.length > length ? str.slice(0, length) + '…' : str;
+}
+
+// what a lookup step returned, and which fields the extractors care about
+const describeMedia = (data) => {
+    const media = data?.gql_data?.shortcode_media
+                    || data?.gql_data?.xdt_shortcode_media
+                    || data;
+    if (!media || typeof media !== 'object') return String(media);
+
+    return snippet({
+        typename: media.__typename,
+        product_type: media.product_type,
+        media_type: media.media_type,
+        is_video: media.is_video,
+        video_url: !!media.video_url,
+        video_versions: media.video_versions?.length,
+        display_url: !!media.display_url,
+        image_versions2: !!media.image_versions2,
+        sidecar: media.edge_sidecar_to_children?.edges?.length,
+        carousel: media.carousel_media?.length,
+    });
 }
 
 export default function instagram(obj) {
@@ -107,6 +140,7 @@ export default function instagram(obj) {
     }
 
     async function getMediaId(id, { cookie, token } = {}) {
+        const step = `oembed (${token ? 'bearer' : cookie ? 'cookie' : 'anonymous'})`;
         const oembedURL = new URL('https://i.instagram.com/api/v1/oembed/');
         oembedURL.searchParams.set('url', `https://www.instagram.com/p/${id}/`);
 
@@ -117,12 +151,17 @@ export default function instagram(obj) {
                 cookie
             },
             dispatcher
-        }).then(r => r.json()).catch(() => {});
+        }).then(async r => {
+            const body = await r.text();
+            debug(id, step, `http ${r.status}`, snippet(body));
+            return JSON.parse(body);
+        }).catch(e => debug(id, step, 'failed:', e.message));
 
         return oembed?.media_id;
     }
 
-    async function requestMobileApi(mediaId, { cookie, token } = {}) {
+    async function requestMobileApi(id, mediaId, { cookie, token } = {}) {
+        const step = `mobile api (${token ? 'bearer' : cookie ? 'cookie' : 'anonymous'})`;
         const mediaInfo = await fetch(`https://i.instagram.com/api/v1/media/${mediaId}/info/`, {
             headers: {
                 ...mobileHeaders,
@@ -130,26 +169,40 @@ export default function instagram(obj) {
                 cookie
             },
             dispatcher
-        }).then(r => r.json()).catch(() => {});
+        }).then(async r => {
+            const body = await r.text();
+            debug(id, step, `http ${r.status}`, r.ok ? '' : snippet(body));
+            return JSON.parse(body);
+        }).catch(e => debug(id, step, 'failed:', e.message));
 
-        return mediaInfo?.items?.[0];
+        const item = mediaInfo?.items?.[0];
+        if (item) debug(id, step, 'got', describeMedia(item));
+        return item;
     }
 
     async function requestHTML(id, cookie) {
+        const step = `embed (${cookie ? 'cookie' : 'anonymous'})`;
         const data = await fetch(`https://www.instagram.com/p/${id}/embed/captioned/`, {
             headers: {
                 ...embedHeaders,
                 cookie
             },
             dispatcher
-        }).then(r => r.text()).catch(() => {});
+        }).then(r => {
+            debug(id, step, `http ${r.status}`);
+            return r.text();
+        }).catch(e => debug(id, step, 'failed:', e.message));
 
         let embedData = JSON.parse(data?.match(/"init",\[\],\[(.*?)\]\],/)[1]);
 
-        if (!embedData || !embedData?.contextJSON) return false;
+        if (!embedData || !embedData?.contextJSON) {
+            debug(id, step, 'no contextJSON in page');
+            return false;
+        }
 
         embedData = JSON.parse(embedData.contextJSON);
 
+        debug(id, step, 'got', describeMedia(embedData));
         return embedData;
     }
 
@@ -240,11 +293,19 @@ export default function instagram(obj) {
             }).toString()
         });
 
-        return {
-            gql_data: await req.json()
-                        .then(r => r.data)
-                        .catch(() => null)
-        };
+        const step = `graphql (${cookie ? 'cookie' : 'anonymous'})`;
+        const gql_data = await req.json()
+                        .then(r => {
+                            debug(id, step, `http ${req.status}`, r.data ? '' : snippet(r));
+                            return r.data;
+                        })
+                        .catch(e => {
+                            debug(id, step, `http ${req.status}`, 'bad json:', e.message);
+                            return null;
+                        });
+
+        if (gql_data) debug(id, step, 'got', describeMedia({ gql_data }));
+        return { gql_data };
     }
 
     async function getErrorContext(id) {
@@ -429,12 +490,14 @@ export default function instagram(obj) {
             if (!media_id && token) media_id = await getMediaId(id, { token });
             if (!media_id && cookie) media_id = await getMediaId(id, { cookie });
 
+            if (!media_id) debug(id, 'mobile api', 'skipped, no media_id');
+
             // mobile api (bearer)
-            if (media_id && token) data = await requestMobileApi(media_id, { token });
+            if (media_id && token) data = await requestMobileApi(id, media_id, { token });
 
             // mobile api (no cookie, cookie)
-            if (media_id && !hasData(data)) data = await requestMobileApi(media_id);
-            if (media_id && cookie && !hasData(data)) data = await requestMobileApi(media_id, { cookie });
+            if (media_id && !hasData(data)) data = await requestMobileApi(id, media_id);
+            if (media_id && cookie && !hasData(data)) data = await requestMobileApi(id, media_id, { cookie });
 
             // html embed (no cookie, cookie)
             if (!hasData(data)) data = await requestHTML(id);
@@ -443,9 +506,12 @@ export default function instagram(obj) {
             // web app graphql api (no cookie, cookie)
             if (!hasData(data)) data = await requestGQL(id);
             if (!hasData(data) && cookie) data = await requestGQL(id, cookie);
-        } catch {}
+        } catch (e) {
+            debug(id, 'lookup chain', 'aborted by exception:', e?.message);
+        }
 
         if (!hasData(data)) {
+            debug(id, 'result', 'no data from any step');
             return getErrorContext(id);
         }
 
@@ -455,6 +521,7 @@ export default function instagram(obj) {
             result = extractNewPost(data, id, alwaysProxy)
         }
 
+        debug(id, 'result', result?.picker ? `picker (${result.picker.length})` : result?.filename);
         if (result) return result;
         return { error: "fetch.empty" }
     }
