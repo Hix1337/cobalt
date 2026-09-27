@@ -193,7 +193,8 @@ export default function instagram(obj) {
             return r.text();
         }).catch(e => debug(id, step, 'failed:', e.message));
 
-        let embedData = JSON.parse(data?.match(/"init",\[\],\[(.*?)\]\],/)[1]);
+        const init = data?.match(/"init",\[\],\[(.*?)\]\],/)?.[1];
+        let embedData = init && JSON.parse(init);
 
         if (!embedData || !embedData?.contextJSON) {
             debug(id, step, 'no contextJSON in page');
@@ -201,6 +202,15 @@ export default function instagram(obj) {
         }
 
         embedData = JSON.parse(embedData.contextJSON);
+
+        // embeds of newer videos come without a video_url, and treating
+        // them as found would return the cover image instead of the video
+        const media = embedData?.gql_data?.shortcode_media;
+        const missingVideo = (node) => node?.is_video && !node.video_url;
+        if (missingVideo(media) || media?.edge_sidecar_to_children?.edges?.some(e => missingVideo(e.node))) {
+            debug(id, step, 'video without video_url, skipping', describeMedia(embedData));
+            return false;
+        }
 
         debug(id, step, 'got', describeMedia(embedData));
         return embedData;
@@ -276,36 +286,34 @@ export default function instagram(obj) {
                 ...headers,
                 cookie,
                 'content-type': 'application/x-www-form-urlencoded',
-                'X-FB-Friendly-Name': 'PolarisPostActionLoadPostQueryQuery',
+                'X-FB-Friendly-Name': 'PolarisPostRootQuery',
             },
             body: new URLSearchParams({
                 ...body,
                 fb_api_caller_class: 'RelayModern',
-                fb_api_req_friendly_name: 'PolarisPostActionLoadPostQueryQuery',
+                fb_api_req_friendly_name: 'PolarisPostRootQuery',
                 variables: JSON.stringify({
                     shortcode: id,
-                    fetch_tagged_user_count: null,
-                    hoisted_comment_id: null,
-                    hoisted_reply_id: null
+                    __relay_internal__pv__PolarisShortDramaEnabledrelayprovider: false,
+                    __relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider: false
                 }),
                 server_timestamps: true,
-                doc_id: '8845758582119845'
+                doc_id: '27830990013244856'
             }).toString()
         });
 
+        // same media format as the mobile api, handled by extractNewPost
         const step = `graphql (${cookie ? 'cookie' : 'anonymous'})`;
-        const gql_data = await req.json()
+        const media = await req.json()
                         .then(r => {
-                            debug(id, step, `http ${req.status}`, r.data ? '' : snippet(r));
-                            return r.data;
+                            const item = r?.data?.xdt_api__v1__media__shortcode__web_info?.items?.[0];
+                            debug(id, step, `http ${req.status}`, item ? '' : snippet(r));
+                            return item;
                         })
-                        .catch(e => {
-                            debug(id, step, `http ${req.status}`, 'bad json:', e.message);
-                            return null;
-                        });
+                        .catch(e => debug(id, step, `http ${req.status}`, 'bad json:', e.message));
 
-        if (gql_data) debug(id, step, 'got', describeMedia({ gql_data }));
-        return { gql_data };
+        if (media) debug(id, step, 'got', describeMedia(media));
+        return media;
     }
 
     async function getErrorContext(id) {
