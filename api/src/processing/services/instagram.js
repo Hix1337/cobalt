@@ -46,6 +46,15 @@ const cachedDtsg = {
     expiry: 0
 }
 
+// doc_id of PolarisPostRootQuery, changes whenever instagram changes the query.
+// if the lookup fails, we look for the current one in the web app's scripts,
+// but not more often than once per docIdRefreshInterval
+const gqlDocId = {
+    value: '27830990013244856',
+    lastRefresh: 0
+}
+const docIdRefreshInterval = 10 * 60 * 1000;
+
 const getNumberFromQuery = (name, data) => {
     const s = data?.match(new RegExp(name + '=(\\d+)'))?.[1];
     if (+s) return +s;
@@ -298,7 +307,7 @@ export default function instagram(obj) {
                     __relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider: false
                 }),
                 server_timestamps: true,
-                doc_id: '27830990013244856'
+                doc_id: gqlDocId.value
             }).toString()
         });
 
@@ -314,6 +323,52 @@ export default function instagram(obj) {
 
         if (media) debug(id, step, 'got', describeMedia(media));
         return media;
+    }
+
+    // returns true only if a new doc_id was found
+    async function refreshDocId(id) {
+        if (gqlDocId.lastRefresh + docIdRefreshInterval > Date.now()) return false;
+        gqlDocId.lastRefresh = Date.now();
+
+        const step = 'doc_id refresh';
+        try {
+            // with plain browser headers, the page lists its main bundles as
+            // regular script tags instead of loading everything via bootloader
+            const html = await fetch(`https://www.instagram.com/p/${id}/`, {
+                headers: {
+                    'user-agent': genericUserAgent,
+                    'accept': 'text/html',
+                    'sec-fetch-mode': 'navigate',
+                    'sec-fetch-dest': 'document',
+                },
+                dispatcher
+            }).then(r => r.text());
+
+            const scripts = [...html.matchAll(
+                /<script\b[^>]*\bsrc="(https:\/\/static\.cdninstagram\.com\/[^"]+\.js[^"]*)"/g
+            )].map(m => m[1].replaceAll('&amp;', '&'));
+
+            for (const url of scripts) {
+                const js = await fetch(url, { dispatcher }).then(r => r.text());
+                const docId = js.match(
+                    /__d\("PolarisPostRootQuery_instagramRelayOperation",\[\],\(function\([^)]*\)\{[^}]*?exports="(\d+)"/
+                )?.[1];
+
+                if (docId) {
+                    debug(id, step, `found ${docId}, current ${gqlDocId.value}`);
+                    if (docId === gqlDocId.value) return false;
+
+                    gqlDocId.value = docId;
+                    return true;
+                }
+            }
+
+            debug(id, step, `not found in ${scripts.length} scripts`);
+        } catch (e) {
+            debug(id, step, 'failed:', e?.message);
+        }
+
+        return false;
     }
 
     async function getErrorContext(id) {
@@ -514,6 +569,12 @@ export default function instagram(obj) {
             // web app graphql api (no cookie, cookie)
             if (!hasData(data)) data = await requestGQL(id);
             if (!hasData(data) && cookie) data = await requestGQL(id, cookie);
+
+            // doc_id might be outdated, try again if there's a new one
+            if (!hasData(data) && await refreshDocId(id)) {
+                data = await requestGQL(id);
+                if (!hasData(data) && cookie) data = await requestGQL(id, cookie);
+            }
         } catch (e) {
             debug(id, 'lookup chain', 'aborted by exception:', e?.message);
         }
