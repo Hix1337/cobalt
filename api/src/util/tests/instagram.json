@@ -130,5 +130,16 @@
             "status": "error",
             "errorCode": "error.api.content.post.private"
         }
+    },
+    {
+        "name": "age-restricted reel",
+        "url": "https://www.instagram.com/reel/Dd3HH7xMfdu/",
+        "canFail": true,
+        "params": {},
+        "expected": {
+            "code": 400,
+            "status": "error",
+            "errorCode": "error.api.content.post.age"
+        }
     }
 ]

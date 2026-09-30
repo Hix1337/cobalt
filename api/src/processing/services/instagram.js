@@ -103,8 +103,22 @@ const isMissingVideo = (media) =>
     (media?.media_type === 2 && !media.video_versions?.length)
     || !!media?.carousel_media?.some(e => e?.media_type === 2 && !e.video_versions?.length);
 
+// oembed is the only step that says why a post can't be seen,
+// for example: {"message":"geoblock_required","title":"People under 18
+// can't see this content","blocks_logging_data":"MIN_AGE_ACCOUNT",...}
+const getGatingError = (oembed) => {
+    if (oembed?.message !== 'geoblock_required') return;
+
+    if (String(oembed.blocks_logging_data).startsWith('MIN_AGE')
+        || /under \d+/i.test(oembed.title))
+        return 'content.post.age';
+}
+
 export default function instagram(obj) {
     const dispatcher = obj.dispatcher;
+
+    // why oembed refused to show the post, if it did
+    let gatingError;
 
     async function findDtsgId(cookie) {
         try {
@@ -171,6 +185,12 @@ export default function instagram(obj) {
             debug(id, step, `http ${r.status}`, snippet(body));
             return JSON.parse(body);
         }).catch(e => debug(id, step, 'failed:', e.message));
+
+        const error = getGatingError(oembed);
+        if (error) {
+            debug(id, step, 'gated:', error);
+            gatingError = error;
+        }
 
         return oembed?.media_id;
     }
@@ -441,6 +461,8 @@ export default function instagram(obj) {
     }
 
     async function getErrorContext(id) {
+        if (gatingError) return { error: gatingError };
+
         try {
             const { headers, body } = await getGQLParams(id);
 
@@ -639,8 +661,10 @@ export default function instagram(obj) {
             if (!hasData(data)) data = await requestGQL(id);
             if (!hasData(data) && cookie) data = await requestGQL(id, cookie);
 
-            // doc_id might be outdated, try again if there's a new one
-            if (!hasData(data) && await refreshDocId(id)) {
+            // doc_id might be outdated, try again if there's a new one.
+            // gated posts fail regardless of doc_id, and refreshing for them
+            // would only delay the refresh for posts that actually need it
+            if (!hasData(data) && !gatingError && await refreshDocId(id)) {
                 data = await requestGQL(id);
                 if (!hasData(data) && cookie) data = await requestGQL(id, cookie);
             }
