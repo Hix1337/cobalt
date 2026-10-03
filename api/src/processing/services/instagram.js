@@ -50,7 +50,7 @@ const cachedDtsg = {
 // if the lookup fails, we look for the current one in the web app's scripts,
 // but not more often than once per docIdRefreshInterval
 const gqlDocId = {
-    value: '27830990013244856',
+    value: '29560628263526992',
     lastRefresh: 0
 }
 const docIdRefreshInterval = 10 * 60 * 1000;
