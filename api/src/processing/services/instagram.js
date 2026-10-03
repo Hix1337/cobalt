@@ -103,13 +103,19 @@ const isMissingVideo = (media) =>
     (media?.media_type === 2 && !media.video_versions?.length)
     || !!media?.carousel_media?.some(e => e?.media_type === 2 && !e.video_versions?.length);
 
-// oembed is the only step that says why a post can't be seen,
-// for example: {"message":"geoblock_required","title":"People under 18
-// can't see this content","blocks_logging_data":"MIN_AGE_ACCOUNT",...}
+// gating types that instagram labels as age restrictions:
+// 3 is a single age-restricted post ("Age-restricted content" on the post page),
+// 12 is an account that limits who can see it (MIN_AGE_ACCOUNT)
+const ageGatingTypes = [3, 12];
+
+// oembed says why a post can't be seen, for example:
+// {"message":"geoblock_required","title":"People under 18 can't see this content",
+// "blocks_logging_data":"MIN_AGE_ACCOUNT","gating_type_thrift":12,...}
 const getGatingError = (oembed) => {
     if (oembed?.message !== 'geoblock_required') return;
 
-    if (String(oembed.blocks_logging_data).startsWith('MIN_AGE')
+    if (ageGatingTypes.includes(oembed.gating_type_thrift)
+        || String(oembed.blocks_logging_data).startsWith('MIN_AGE')
         || /under \d+/i.test(oembed.title))
         return 'content.post.age';
 }
@@ -117,7 +123,7 @@ const getGatingError = (oembed) => {
 export default function instagram(obj) {
     const dispatcher = obj.dispatcher;
 
-    // why oembed refused to show the post, if it did
+    // why instagram refused to show the post, if it said so
     let gatingError;
 
     async function findDtsgId(cookie) {
@@ -444,7 +450,17 @@ export default function instagram(obj) {
 
         for (const block of blocks) {
             try {
-                const media = findMedia(JSON.parse(block))?.if_not_gated_logged_out;
+                const polarisMedia = findMedia(JSON.parse(block));
+                const media = polarisMedia?.if_not_gated_logged_out;
+
+                // gated posts come with a reason instead of media
+                const ruling = polarisMedia?.gating_ruling;
+                if (!media && ruling) {
+                    debug(id, step, 'gated:', snippet(ruling));
+                    if (ageGatingTypes.includes(ruling.gating_type))
+                        gatingError ||= 'content.post.age';
+                }
+
                 if (isMissingVideo(media)) {
                     debug(id, step, 'video without video_versions, skipping', describeMedia(media));
                     return;

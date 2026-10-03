@@ -141,5 +141,16 @@
             "status": "error",
             "errorCode": "error.api.content.post.age"
         }
+    },
+    {
+        "name": "age-restricted reel (single post)",
+        "url": "https://www.instagram.com/reel/DeCcGVcSa55/?stkn=dmhkY3pndGpwcng2",
+        "canFail": true,
+        "params": {},
+        "expected": {
+            "code": 400,
+            "status": "error",
+            "errorCode": "error.api.content.post.age"
+        }
     }
 ]
